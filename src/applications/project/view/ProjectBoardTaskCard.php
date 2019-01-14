@@ -118,6 +118,39 @@ final class ProjectBoardTaskCard extends Phobject {
       }
     }
 
+    // Show custom field "deadline"
+    $fields = PhabricatorCustomField::getObjectFields(
+      $task, PhabricatorCustomField::ROLE_VIEW);
+    if ($fields) {
+      $fields->readFieldsFromStorage($task);
+      foreach ($fields->getFields() as $field) {
+        if ($field->getModernFieldKey() == 'custom.feature.deadline') {
+          $deadline = $field->getValueForStorage();
+          if ($deadline) {
+            $deadlineText = phabricator_date($deadline, $viewer);
+            $fields_tag = id(new PHUITagView())
+              ->setType(PHUITagView::TYPE_OBJECT)
+              ->setColor(PHUITagView::COLOR_GREY)
+              ->setSlimShady(true)
+              ->setName($deadlineText)
+              ->addClass('phui-workcard-points');
+            $now = time();
+            $day = 86400;
+            if ($deadline < $now) {
+              $fields_tag->setColor(PHUITagView::COLOR_RED);
+            } else if ($deadline < $now + ($day * 2.5)) {
+              $fields_tag->setColor(PHUITagView::COLOR_ORANGE);
+            } else if ($deadline < $now + ($day * 7)) {
+              $fields_tag->setColor(PHUITagView::COLOR_BLUE);
+            } else {
+              $fields_tag->setColor(PHUITagView::COLOR_GREY);
+            }
+            $card->addAttribute($fields_tag);
+          }
+        }
+      }
+    }
+
     $subtype = $task->newSubtypeObject();
     if ($subtype && $subtype->hasTagView()) {
       $subtype_tag = $subtype->newTagView()
