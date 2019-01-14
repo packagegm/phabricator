@@ -101,7 +101,22 @@ final class ManiphestTaskListView extends ManiphestView {
           'none',
           phabricator_datetime($task->getDateModified(), $this->getUser()));
       }
-
+      // Show custom field "deadline"
+      $fields = PhabricatorCustomField::getObjectFields(
+        $task, PhabricatorCustomField::ROLE_VIEW);
+      if ($fields) {
+        $fields->readFieldsFromStorage($task);
+        foreach ($fields->getFields() as $field){
+          if ($field->getModernFieldKey()=='custom.feature.deadline'){
+            $deadline = $field->getValueForStorage();
+            if ($deadline) {
+              $item->addIcon(
+                'fa-calendar-check-o',
+                phabricator_datetime($deadline, $this->getUser()));
+            }
+          }
+        }
+      }
       if ($this->showSubpriorityControls) {
         $item->setGrippable(true);
       }
