@@ -126,7 +126,7 @@ final class ProjectBoardTaskCard extends Phobject {
       foreach ($fields->getFields() as $field) {
         if ($field->getModernFieldKey() == 'custom.feature.deadline') {
           $deadline = $field->getValueForStorage();
-          if ($deadline) {
+          if ($deadline && !$task->isClosed()) {
             $deadlineText = phabricator_date($deadline, $viewer);
             $fields_tag = id(new PHUITagView())
               ->setType(PHUITagView::TYPE_OBJECT)
