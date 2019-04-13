@@ -10,6 +10,10 @@ final class PhabricatorDashboardApplication extends PhabricatorApplication {
     return '/dashboard/';
   }
 
+  public function getTypeaheadURI() {
+    return '/dashboard/console/';
+  }
+
   public function getShortDescription() {
     return pht('Create Custom Pages');
   }
@@ -27,6 +31,9 @@ final class PhabricatorDashboardApplication extends PhabricatorApplication {
   }
 
   public function getRoutes() {
+    $menu_rules = $this->getProfileMenuRouting(
+      'PhabricatorDashboardPortalViewController');
+
     return array(
       '/W(?P<id>\d+)' => 'PhabricatorDashboardPanelViewController',
       '/dashboard/' => array(
@@ -34,11 +41,13 @@ final class PhabricatorDashboardApplication extends PhabricatorApplication {
           => 'PhabricatorDashboardListController',
         'view/(?P<id>\d+)/' => 'PhabricatorDashboardViewController',
         'archive/(?P<id>\d+)/' => 'PhabricatorDashboardArchiveController',
-        'manage/(?P<id>\d+)/' => 'PhabricatorDashboardManageController',
-        'arrange/(?P<id>\d+)/' => 'PhabricatorDashboardArrangeController',
-        'create/' => 'PhabricatorDashboardEditController',
-        'edit/(?:(?P<id>\d+)/)?' => 'PhabricatorDashboardEditController',
-        'install/(?:(?P<id>\d+)/)?' => 'PhabricatorDashboardInstallController',
+        $this->getEditRoutePattern('edit/') =>
+          'PhabricatorDashboardEditController',
+        'install/(?P<id>\d+)/'.
+          '(?:(?P<workflowKey>[^/]+)/'.
+          '(?:(?P<modeKey>[^/]+)/)?)?' =>
+          'PhabricatorDashboardInstallController',
+        'console/' => 'PhabricatorDashboardConsoleController',
         'addpanel/(?P<id>\d+)/' => 'PhabricatorDashboardAddPanelController',
         'movepanel/(?P<id>\d+)/' => 'PhabricatorDashboardMovePanelController',
         'removepanel/(?P<id>\d+)/'
@@ -48,14 +57,24 @@ final class PhabricatorDashboardApplication extends PhabricatorApplication {
             'PhabricatorDashboardQueryPanelInstallController',
           '(?:query/(?P<queryKey>[^/]+)/)?'
             => 'PhabricatorDashboardPanelListController',
-          'create/' => 'PhabricatorDashboardPanelEditController',
-          $this->getEditRoutePattern('editpro/')
-            => 'PhabricatorDashboardPanelEditproController',
-          'edit/(?:(?P<id>\d+)/)?' => 'PhabricatorDashboardPanelEditController',
+          $this->getEditRoutePattern('edit/')
+            => 'PhabricatorDashboardPanelEditController',
           'render/(?P<id>\d+)/' => 'PhabricatorDashboardPanelRenderController',
           'archive/(?P<id>\d+)/'
             => 'PhabricatorDashboardPanelArchiveController',
+          'tabs/(?P<id>\d+)/(?P<op>add|move|remove|rename)/'
+            => 'PhabricatorDashboardPanelTabsController',
         ),
+      ),
+      '/portal/' => array(
+        $this->getQueryRoutePattern() =>
+          'PhabricatorDashboardPortalListController',
+        $this->getEditRoutePattern('edit/') =>
+          'PhabricatorDashboardPortalEditController',
+        'view/(?P<portalID>\d)/' => array(
+            '' => 'PhabricatorDashboardPortalViewController',
+          ) + $menu_rules,
+
       ),
     );
   }

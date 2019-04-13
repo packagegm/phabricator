@@ -72,7 +72,7 @@ abstract class PhabricatorApplicationTransactionEditor
   private $mailShouldSend = false;
   private $modularTypes;
   private $silent;
-  private $mustEncrypt;
+  private $mustEncrypt = array();
   private $stampTemplates = array();
   private $mailStamps = array();
   private $oldTo = array();
@@ -88,6 +88,12 @@ abstract class PhabricatorApplicationTransactionEditor
   private $hasRequiredMFA = false;
   private $request;
   private $cancelURI;
+  private $extensions;
+
+  private $parentEditor;
+  private $subEditors = array();
+  private $publishableObject;
+  private $publishableTransactions;
 
   const STORAGE_ENCODING_BINARY = 'binary';
 
@@ -359,12 +365,7 @@ abstract class PhabricatorApplicationTransactionEditor
     }
 
     if ($template) {
-      try {
-        $comment = $template->getApplicationTransactionCommentObject();
-      } catch (PhutilMethodNotImplementedException $ex) {
-        $comment = null;
-      }
-
+      $comment = $template->getApplicationTransactionCommentObject();
       if ($comment) {
         $types[] = PhabricatorTransactions::TYPE_COMMENT;
       }
@@ -447,6 +448,12 @@ abstract class PhabricatorApplicationTransactionEditor
               'edge:type'));
         }
 
+        // See T13082. If this is an inverse edit, the parent editor has
+        // already populated the transaction values correctly.
+        if ($this->getIsInverseEdgeEditor()) {
+          return $xaction->getOldValue();
+        }
+
         $old_edges = array();
         if ($object->getPHID()) {
           $edge_src = $object->getPHID();
@@ -513,6 +520,12 @@ abstract class PhabricatorApplicationTransactionEditor
           return $space_phid;
         }
       case PhabricatorTransactions::TYPE_EDGE:
+        // See T13082. If this is an inverse edit, the parent editor has
+        // already populated appropriate transaction values.
+        if ($this->getIsInverseEdgeEditor()) {
+          return $xaction->getNewValue();
+        }
+
         $new_value = $this->getEdgeTransactionNewValue($xaction);
 
         $edge_type = $xaction->getMetadataValue('edge:type');
@@ -790,14 +803,6 @@ abstract class PhabricatorApplicationTransactionEditor
         $src = $object->getPHID();
         $const = $xaction->getMetadataValue('edge:type');
 
-        $type = PhabricatorEdgeType::getByConstant($const);
-        if ($type->shouldWriteInverseTransactions()) {
-          $this->applyInverseEdgeTransactions(
-            $object,
-            $xaction,
-            $type->getInverseEdgeConstant());
-        }
-
         foreach ($new as $dst_phid => $edge) {
           $new[$dst_phid]['src'] = $src;
         }
@@ -900,6 +905,30 @@ abstract class PhabricatorApplicationTransactionEditor
     foreach ($xactions as $xaction) {
       $type = $xaction->getTransactionType();
 
+      // See T13082. When we're writing edges that imply corresponding inverse
+      // transactions, apply those inverse transactions now. We have to wait
+      // until the object we're editing (with this editor) has committed its
+      // transactions to do this. If we don't, the inverse editor may race,
+      // build a mail before we actually commit this object, and render "alice
+      // added an edge: Unknown Object".
+
+      if ($type === PhabricatorTransactions::TYPE_EDGE) {
+        // Don't do anything if we're already an inverse edge editor.
+        if ($this->getIsInverseEdgeEditor()) {
+          continue;
+        }
+
+        $edge_const = $xaction->getMetadataValue('edge:type');
+        $edge_type = PhabricatorEdgeType::getByConstant($edge_const);
+        if ($edge_type->shouldWriteInverseTransactions()) {
+          $this->applyInverseEdgeTransactions(
+            $object,
+            $xaction,
+            $edge_type->getInverseEdgeConstant());
+        }
+        continue;
+      }
+
       $xtype = $this->getModularTransactionType($type);
       if (!$xtype) {
         continue;
@@ -985,6 +1014,7 @@ abstract class PhabricatorApplicationTransactionEditor
       }
 
       $errors[] = $this->validateAllTransactions($object, $xactions);
+      $errors[] = $this->validateTransactionsWithExtensions($object, $xactions);
       $errors = array_mergev($errors);
 
       $continue_on_missing = $this->getContinueOnMissingFields();
@@ -1083,11 +1113,22 @@ abstract class PhabricatorApplicationTransactionEditor
       $comment_editor = id(new PhabricatorApplicationTransactionCommentEditor())
         ->setActor($actor)
         ->setActingAsPHID($this->getActingAsPHID())
-        ->setContentSource($this->getContentSource());
+        ->setContentSource($this->getContentSource())
+        ->setIsNewComment(true);
 
       if (!$transaction_open) {
         $object->openTransaction();
         $transaction_open = true;
+      }
+
+      // We can technically test any object for CAN_INTERACT, but we can
+      // run into some issues in doing so (for example, in project unit tests).
+      // For now, only test for CAN_INTERACT if the object is explicitly a
+      // lockable object.
+
+      $was_locked = false;
+      if ($object instanceof PhabricatorEditEngineLockableInterface) {
+        $was_locked = !PhabricatorPolicyFilter::canInteract($actor, $object);
       }
 
       foreach ($xactions as $xaction) {
@@ -1107,6 +1148,10 @@ abstract class PhabricatorApplicationTransactionEditor
       }
 
       foreach ($xactions as $xaction) {
+        if ($was_locked) {
+          $xaction->setIsLockOverrideTransaction(true);
+        }
+
         $xaction->setObjectPHID($object->getPHID());
         if ($xaction->getComment()) {
           $xaction->setPHID($xaction->generatePHID());
@@ -1233,10 +1278,9 @@ abstract class PhabricatorApplicationTransactionEditor
         $herald_source = PhabricatorContentSource::newForSource(
           PhabricatorHeraldContentSource::SOURCECONST);
 
-        $herald_editor = newv(get_class($this), array())
+        $herald_editor = $this->newEditorCopy()
           ->setContinueOnNoEffect(true)
           ->setContinueOnMissingFields(true)
-          ->setParentMessageID($this->getParentMessageID())
           ->setIsHeraldEditor(true)
           ->setActor($herald_actor)
           ->setActingAsPHID($herald_phid)
@@ -1290,6 +1334,38 @@ abstract class PhabricatorApplicationTransactionEditor
         $object->getPHID());
     }
     $this->heraldHeader = $herald_header;
+
+    // See PHI1134. If we're a subeditor, we don't publish information about
+    // the edit yet. Our parent editor still needs to finish applying
+    // transactions and execute Herald, which may change the information we
+    // publish.
+
+    // For example, Herald actions may change the parent object's title or
+    // visibility, or Herald may apply rules like "Must Encrypt" that affect
+    // email.
+
+    // Once the parent finishes work, it will queue its own publish step and
+    // then queue publish steps for its children.
+
+    $this->publishableObject = $object;
+    $this->publishableTransactions = $xactions;
+    if (!$this->parentEditor) {
+      $this->queuePublishing();
+    }
+
+    return $xactions;
+  }
+
+  final private function queuePublishing() {
+    $object = $this->publishableObject;
+    $xactions = $this->publishableTransactions;
+
+    if (!$object) {
+      throw new Exception(
+        pht(
+          'Editor method "queuePublishing()" was called, but no publishable '.
+          'object is present. This Editor is not ready to publish.'));
+    }
 
     // We're going to compute some of the data we'll use to publish these
     // transactions here, before queueing a worker.
@@ -1353,9 +1429,11 @@ abstract class PhabricatorApplicationTransactionEditor
         'priority' => PhabricatorWorker::PRIORITY_ALERTS,
       ));
 
-    $this->flushTransactionQueue($object);
+    foreach ($this->subEditors as $sub_editor) {
+      $sub_editor->queuePublishing();
+    }
 
-    return $xactions;
+    $this->flushTransactionQueue($object);
   }
 
   protected function didCatchDuplicateKeyException(
@@ -1504,6 +1582,12 @@ abstract class PhabricatorApplicationTransactionEditor
       $expect_value = !$xaction->shouldGenerateOldValue();
       $has_value = $xaction->hasOldValue();
 
+      // See T13082. In the narrow case of applying inverse edge edits, we
+      // expect the old value to be populated.
+      if ($this->getIsInverseEdgeEditor()) {
+        $expect_value = true;
+      }
+
       if ($expect_value && !$has_value) {
         throw new PhabricatorApplicationTransactionStructureException(
           $xaction,
@@ -1603,9 +1687,48 @@ abstract class PhabricatorApplicationTransactionEditor
         // don't enforce it here.
         return null;
       case PhabricatorTransactions::TYPE_SUBSCRIBERS:
-        // TODO: Removing subscribers other than yourself should probably
-        // require CAN_EDIT permission. You can do this via the API but
-        // generally can not via the web interface.
+        // Anyone can subscribe to or unsubscribe from anything they can view,
+        // with no other permissions.
+
+        $old = array_fuse($xaction->getOldValue());
+        $new = array_fuse($xaction->getNewValue());
+
+        // To remove users other than yourself, you must be able to edit the
+        // object.
+        $rem = array_diff_key($old, $new);
+        foreach ($rem as $phid) {
+          if ($phid !== $this->getActingAsPHID()) {
+            return PhabricatorPolicyCapability::CAN_EDIT;
+          }
+        }
+
+        // To add users other than yourself, you must be able to interact.
+        // This allows "@mentioning" users to work as long as you can comment
+        // on objects.
+
+        // If you can edit, we return that policy instead so that you can
+        // override a soft lock and still make edits.
+
+        // TODO: This is a little bit hacky. We really want to be able to say
+        // "this requires either interact or edit", but there's currently no
+        // way to specify this kind of requirement.
+
+        $can_edit = PhabricatorPolicyFilter::hasCapability(
+          $this->getActor(),
+          $this->object,
+          PhabricatorPolicyCapability::CAN_EDIT);
+
+        $add = array_diff_key($new, $old);
+        foreach ($add as $phid) {
+          if ($phid !== $this->getActingAsPHID()) {
+            if ($can_edit) {
+              return PhabricatorPolicyCapability::CAN_EDIT;
+            } else {
+              return PhabricatorPolicyCapability::CAN_INTERACT;
+            }
+          }
+        }
+
         return null;
       case PhabricatorTransactions::TYPE_TOKEN:
         // TODO: This technically requires CAN_INTERACT, like comments.
@@ -1677,6 +1800,9 @@ abstract class PhabricatorApplicationTransactionEditor
 
         // You need CAN_EDIT to change members other than yourself.
         return PhabricatorPolicyCapability::CAN_EDIT;
+      case PhabricatorObjectHasWatcherEdgeType::EDGECONST:
+        // See PHI1024. Watching a project does not require CAN_EDIT.
+        return null;
       default:
         return PhabricatorPolicyCapability::CAN_EDIT;
     }
@@ -1729,31 +1855,52 @@ abstract class PhabricatorApplicationTransactionEditor
       $users = mpull($users, null, 'getPHID');
 
       foreach ($phids as $key => $phid) {
-        // Do not subscribe mentioned users
-        // who do not have VIEW Permissions
-        if ($object instanceof PhabricatorPolicyInterface
-          && !PhabricatorPolicyFilter::hasCapability(
-          $users[$phid],
-          $object,
-          PhabricatorPolicyCapability::CAN_VIEW)
-        ) {
+        $user = idx($users, $phid);
+
+        // Don't subscribe invalid users.
+        if (!$user) {
           unset($phids[$key]);
-        } else {
-          if ($object->isAutomaticallySubscribed($phid)) {
+          continue;
+        }
+
+        // Don't subscribe bots that get mentioned. If users truly intend
+        // to subscribe them, they can add them explicitly, but it's generally
+        // not useful to subscribe bots to objects.
+        if ($user->getIsSystemAgent()) {
+          unset($phids[$key]);
+          continue;
+        }
+
+        // Do not subscribe mentioned users who do not have permission to see
+        // the object.
+        if ($object instanceof PhabricatorPolicyInterface) {
+          $can_view = PhabricatorPolicyFilter::hasCapability(
+            $user,
+            $object,
+            PhabricatorPolicyCapability::CAN_VIEW);
+          if (!$can_view) {
             unset($phids[$key]);
+            continue;
           }
         }
+
+        // Don't subscribe users who are already automatically subscribed.
+        if ($object->isAutomaticallySubscribed($phid)) {
+          unset($phids[$key]);
+          continue;
+        }
       }
+
       $phids = array_values($phids);
     }
-    // No else here to properly return null should we unset all subscriber
+
     if (!$phids) {
       return null;
     }
 
-    $xaction = newv(get_class(head($xactions)), array());
-    $xaction->setTransactionType(PhabricatorTransactions::TYPE_SUBSCRIBERS);
-    $xaction->setNewValue(array('+' => $phids));
+    $xaction = $object->getApplicationTransactionTemplate()
+      ->setTransactionType(PhabricatorTransactions::TYPE_SUBSCRIBERS)
+      ->setNewValue(array('+' => $phids));
 
     return $xaction;
   }
@@ -2630,9 +2777,15 @@ abstract class PhabricatorApplicationTransactionEditor
     $transaction_type) {
     $errors = array();
 
-    $factors = id(new PhabricatorAuthFactorConfig())->loadAllWhere(
-      'userPHID = %s',
-      $this->getActingAsPHID());
+    $factors = id(new PhabricatorAuthFactorConfigQuery())
+      ->setViewer($this->getActor())
+      ->withUserPHIDs(array($this->getActingAsPHID()))
+      ->withFactorProviderStatuses(
+        array(
+          PhabricatorAuthFactorProviderStatus::STATUS_ACTIVE,
+          PhabricatorAuthFactorProviderStatus::STATUS_DEPRECATED,
+        ))
+      ->execute();
 
     foreach ($xactions as $xaction) {
       if (!$factors) {
@@ -2781,6 +2934,24 @@ abstract class PhabricatorApplicationTransactionEditor
         // don't implicitly CC them.
         return $xactions;
       }
+    }
+
+    $actor = $this->getActor();
+
+    $user = id(new PhabricatorPeopleQuery())
+      ->setViewer($actor)
+      ->withPHIDs(array($actor_phid))
+      ->executeOne();
+    if (!$user) {
+      return $xactions;
+    }
+
+    // When a bot acts (usually via the API), don't automatically subscribe
+    // them as a side effect. They can always subscribe explicitly if they
+    // want, and bot subscriptions normally just clutter things up since bots
+    // usually do not read email.
+    if ($user->getIsSystemAgent()) {
+      return $xactions;
     }
 
     $xaction = newv(get_class(head($xactions)), array());
@@ -3249,7 +3420,7 @@ abstract class PhabricatorApplicationTransactionEditor
       // move the other transactions down so they provide context above the
       // actual comment.
 
-      $comment = $xaction->getBodyForMail();
+      $comment = $this->getBodyForTextMail($xaction);
       if ($comment !== null) {
         $is_comment = true;
         $comments[] = array(
@@ -3262,12 +3433,12 @@ abstract class PhabricatorApplicationTransactionEditor
       }
 
       if (!$is_comment || !$seen_comment) {
-        $header = $xaction->getTitleForMail();
+        $header = $this->getTitleForTextMail($xaction);
         if ($header !== null) {
           $headers[] = $header;
         }
 
-        $header_html = $xaction->getTitleForHTMLMail();
+        $header_html = $this->getTitleForHTMLMail($xaction);
         if ($header_html !== null) {
           $headers_html[] = $header_html;
         }
@@ -3347,12 +3518,12 @@ abstract class PhabricatorApplicationTransactionEditor
       // If this is not the first comment in the mail, add the header showing
       // who wrote the comment immediately above the comment.
       if (!$is_initial) {
-        $header = $xaction->getTitleForMail();
+        $header = $this->getTitleForTextMail($xaction);
         if ($header !== null) {
           $body->addRawPlaintextSection($header);
         }
 
-        $header_html = $xaction->getTitleForHTMLMail();
+        $header_html = $this->getTitleForHTMLMail($xaction);
         if ($header_html !== null) {
           $body->addRawHTMLSection($header_html);
         }
@@ -3686,9 +3857,19 @@ abstract class PhabricatorApplicationTransactionEditor
 
     $this->mustEncrypt = $adapter->getMustEncryptReasons();
 
+    // See PHI1134. Propagate "Must Encrypt" state to sub-editors.
+    foreach ($this->subEditors as $sub_editor) {
+      $sub_editor->mustEncrypt = $this->mustEncrypt;
+    }
+
+    $apply_xactions = $this->didApplyHeraldRules($object, $adapter, $xscript);
+    assert_instances_of($apply_xactions, 'PhabricatorApplicationTransaction');
+
+    $queue_xactions = $adapter->getQueuedTransactions();
+
     return array_merge(
-      $this->didApplyHeraldRules($object, $adapter, $xscript),
-      $adapter->getQueuedTransactions());
+      array_values($apply_xactions),
+      array_values($queue_xactions));
   }
 
   protected function didApplyHeraldRules(
@@ -3850,6 +4031,8 @@ abstract class PhabricatorApplicationTransactionEditor
       ->withPHIDs($all)
       ->execute();
 
+    $object_phid = $object->getPHID();
+
     foreach ($nodes as $node) {
       if (!($node instanceof PhabricatorApplicationTransactionInterface)) {
         continue;
@@ -3862,32 +4045,43 @@ abstract class PhabricatorApplicationTransactionEditor
         continue;
       }
 
+      $node_phid = $node->getPHID();
       $editor = $node->getApplicationTransactionEditor();
       $template = $node->getApplicationTransactionTemplate();
 
-      if (isset($add[$node->getPHID()])) {
-        $edge_edit_type = '+';
+      // See T13082. We have to build these transactions with synthetic values
+      // because we've already applied the actual edit to the edge database
+      // table. If we try to apply this transaction naturally, it will no-op
+      // itself because it doesn't have any effect.
+
+      $edge_query = id(new PhabricatorEdgeQuery())
+        ->withSourcePHIDs(array($node_phid))
+        ->withEdgeTypes(array($inverse_type));
+
+      $edge_query->execute();
+
+      $edge_phids = $edge_query->getDestinationPHIDs();
+      $edge_phids = array_fuse($edge_phids);
+
+      $new_phids = $edge_phids;
+      $old_phids = $edge_phids;
+
+      if (isset($add[$node_phid])) {
+        unset($old_phids[$object_phid]);
       } else {
-        $edge_edit_type = '-';
+        $old_phids[$object_phid] = $object_phid;
       }
 
       $template
         ->setTransactionType($xaction->getTransactionType())
         ->setMetadataValue('edge:type', $inverse_type)
-        ->setNewValue(
-          array(
-            $edge_edit_type => array($object->getPHID() => $object->getPHID()),
-          ));
+        ->setOldValue($old_phids)
+        ->setNewValue($new_phids);
 
-      $editor
+      $editor = $this->newSubEditor($editor)
         ->setContinueOnNoEffect(true)
         ->setContinueOnMissingFields(true)
-        ->setParentMessageID($this->getParentMessageID())
-        ->setIsInverseEdgeEditor(true)
-        ->setIsSilent($this->getIsSilent())
-        ->setActor($this->requireActor())
-        ->setActingAsPHID($this->getActingAsPHID())
-        ->setContentSource($this->getContentSource());
+        ->setIsInverseEdgeEditor(true);
 
       $editor->applyTransactions($node, array($template));
     }
@@ -4396,22 +4590,40 @@ abstract class PhabricatorApplicationTransactionEditor
     $xactions = $this->transactionQueue;
     $this->transactionQueue = array();
 
-    $editor = $this->newQueueEditor();
+    $editor = $this->newEditorCopy();
 
     return $editor->applyTransactions($object, $xactions);
   }
 
-  private function newQueueEditor() {
-    $editor = id(newv(get_class($this), array()))
+  final protected function newSubEditor(
+    PhabricatorApplicationTransactionEditor $template = null) {
+    $editor = $this->newEditorCopy($template);
+
+    $editor->parentEditor = $this;
+    $this->subEditors[] = $editor;
+
+    return $editor;
+  }
+
+  private function newEditorCopy(
+    PhabricatorApplicationTransactionEditor $template = null) {
+    if ($template === null) {
+      $template = newv(get_class($this), array());
+    }
+
+    $editor = id(clone $template)
       ->setActor($this->getActor())
       ->setContentSource($this->getContentSource())
       ->setContinueOnNoEffect($this->getContinueOnNoEffect())
       ->setContinueOnMissingFields($this->getContinueOnMissingFields())
+      ->setParentMessageID($this->getParentMessageID())
       ->setIsSilent($this->getIsSilent());
 
     if ($this->actingAsPHID !== null) {
       $editor->setActingAsPHID($this->actingAsPHID);
     }
+
+    $editor->mustEncrypt = $this->mustEncrypt;
 
     return $editor;
   }
@@ -4793,6 +5005,13 @@ abstract class PhabricatorApplicationTransactionEditor
   }
 
   private function requireMFA(PhabricatorLiskDAO $object, array $xactions) {
+    $actor = $this->getActor();
+
+    // Let omnipotent editors skip MFA. This is mostly aimed at scripts.
+    if ($actor->isOmnipotent()) {
+      return;
+    }
+
     $editor_class = get_class($this);
 
     $object_phid = $object->getPHID();
@@ -4806,8 +5025,6 @@ abstract class PhabricatorApplicationTransactionEditor
         'editor(%s).new()',
         $editor_class);
     }
-
-    $actor = $this->getActor();
 
     $request = $this->getRequest();
     if ($request === null) {
@@ -4851,16 +5068,47 @@ abstract class PhabricatorApplicationTransactionEditor
     PhabricatorLiskDAO $object,
     array $xactions) {
 
-    $is_mfa = ($object instanceof PhabricatorEditEngineMFAInterface);
-    if (!$is_mfa) {
+    $has_engine = ($object instanceof PhabricatorEditEngineMFAInterface);
+    if ($has_engine) {
+      $engine = PhabricatorEditEngineMFAEngine::newEngineForObject($object)
+        ->setViewer($this->getActor());
+      $require_mfa = $engine->shouldRequireMFA();
+      $try_mfa = $engine->shouldTryMFA();
+    } else {
+      $require_mfa = false;
+      $try_mfa = false;
+    }
+
+    // If the user is mentioning an MFA object on another object or creating
+    // a relationship like "parent" or "child" to this object, we always
+    // allow the edit to move forward without requiring MFA.
+    if ($this->getIsInverseEdgeEditor()) {
       return $xactions;
     }
 
-    $engine = PhabricatorEditEngineMFAEngine::newEngineForObject($object)
-      ->setViewer($this->getActor());
-    $require_mfa = $engine->shouldRequireMFA();
-
     if (!$require_mfa) {
+      // If the object hasn't already opted into MFA, see if any of the
+      // transactions want it.
+      if (!$try_mfa) {
+        foreach ($xactions as $xaction) {
+          $type = $xaction->getTransactionType();
+
+          $xtype = $this->getModularTransactionType($type);
+          if ($xtype) {
+            $xtype = clone $xtype;
+            $xtype->setStorage($xaction);
+            if ($xtype->shouldTryMFA($object, $xaction)) {
+              $try_mfa = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if ($try_mfa) {
+        $this->setShouldRequireMFA(true);
+      }
+
       return $xactions;
     }
 
@@ -4878,13 +5126,6 @@ abstract class PhabricatorApplicationTransactionEditor
       return $xactions;
     }
 
-    // If the user is mentioning an MFA object on another object or creating
-    // a relationship like "parent" or "child" to this object, we allow the
-    // edit to move forward without requiring MFA.
-    if ($this->getIsInverseEdgeEditor()) {
-      return $xactions;
-    }
-
     $template = $object->getApplicationTransactionTemplate();
 
     $mfa_xaction = id(clone $template)
@@ -4895,5 +5136,113 @@ abstract class PhabricatorApplicationTransactionEditor
 
     return $xactions;
   }
+
+  private function getTitleForTextMail(
+    PhabricatorApplicationTransaction $xaction) {
+    $type = $xaction->getTransactionType();
+
+    $xtype = $this->getModularTransactionType($type);
+    if ($xtype) {
+      $xtype = clone $xtype;
+      $xtype->setStorage($xaction);
+      $comment = $xtype->getTitleForTextMail();
+      if ($comment !== false) {
+        return $comment;
+      }
+    }
+
+    return $xaction->getTitleForTextMail();
+  }
+
+  private function getTitleForHTMLMail(
+    PhabricatorApplicationTransaction $xaction) {
+    $type = $xaction->getTransactionType();
+
+    $xtype = $this->getModularTransactionType($type);
+    if ($xtype) {
+      $xtype = clone $xtype;
+      $xtype->setStorage($xaction);
+      $comment = $xtype->getTitleForHTMLMail();
+      if ($comment !== false) {
+        return $comment;
+      }
+    }
+
+    return $xaction->getTitleForHTMLMail();
+  }
+
+
+  private function getBodyForTextMail(
+    PhabricatorApplicationTransaction $xaction) {
+    $type = $xaction->getTransactionType();
+
+    $xtype = $this->getModularTransactionType($type);
+    if ($xtype) {
+      $xtype = clone $xtype;
+      $xtype->setStorage($xaction);
+      $comment = $xtype->getBodyForTextMail();
+      if ($comment !== false) {
+        return $comment;
+      }
+    }
+
+    return $xaction->getBodyForMail();
+  }
+
+
+/* -(  Extensions  )--------------------------------------------------------- */
+
+
+  private function validateTransactionsWithExtensions(
+    PhabricatorLiskDAO $object,
+    array $xactions) {
+    $errors = array();
+
+    $extensions = $this->getEditorExtensions();
+    foreach ($extensions as $extension) {
+      $extension_errors = $extension
+        ->setObject($object)
+        ->validateTransactions($object, $xactions);
+
+      assert_instances_of(
+        $extension_errors,
+        'PhabricatorApplicationTransactionValidationError');
+
+      $errors[] = $extension_errors;
+    }
+
+    return array_mergev($errors);
+  }
+
+  private function getEditorExtensions() {
+    if ($this->extensions === null) {
+      $this->extensions = $this->newEditorExtensions();
+    }
+    return $this->extensions;
+  }
+
+  private function newEditorExtensions() {
+    $extensions = PhabricatorEditorExtension::getAllExtensions();
+
+    $actor = $this->getActor();
+    $object = $this->object;
+    foreach ($extensions as $key => $extension) {
+
+      $extension = id(clone $extension)
+        ->setViewer($actor)
+        ->setEditor($this)
+        ->setObject($object);
+
+      if (!$extension->supportsObject($this, $object)) {
+        unset($extensions[$key]);
+        continue;
+      }
+
+      $extensions[$key] = $extension;
+    }
+
+    return $extensions;
+  }
+
 
 }

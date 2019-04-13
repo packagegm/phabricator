@@ -8,10 +8,10 @@ final class PhabricatorDashboardPanel
   implements
     PhabricatorApplicationTransactionInterface,
     PhabricatorPolicyInterface,
-    PhabricatorCustomFieldInterface,
     PhabricatorFlaggableInterface,
     PhabricatorDestructibleInterface,
-    PhabricatorNgramsInterface {
+    PhabricatorNgramsInterface,
+    PhabricatorDashboardPanelContainerInterface {
 
   protected $name;
   protected $panelType;
@@ -20,8 +20,6 @@ final class PhabricatorDashboardPanel
   protected $authorPHID;
   protected $isArchived = 0;
   protected $properties = array();
-
-  private $customFields = self::ATTACHABLE;
 
   public static function initializeNewPanel(PhabricatorUser $actor) {
     return id(new PhabricatorDashboardPanel())
@@ -105,6 +103,10 @@ final class PhabricatorDashboardPanel
     return $impl;
   }
 
+  public function getEditEngineFields() {
+    return $this->requireImplementation()->getEditEngineFields($this);
+  }
+
 
 /* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
 
@@ -142,27 +144,6 @@ final class PhabricatorDashboardPanel
   }
 
 
-/* -(  PhabricatorCustomFieldInterface  )------------------------------------ */
-
-
-  public function getCustomFieldSpecificationForRole($role) {
-    return array();
-  }
-
-  public function getCustomFieldBaseClass() {
-    return 'PhabricatorDashboardPanelCustomField';
-  }
-
-  public function getCustomFields() {
-    return $this->assertAttached($this->customFields);
-  }
-
-  public function attachCustomFields(PhabricatorCustomFieldAttachment $fields) {
-    $this->customFields = $fields;
-    return $this;
-  }
-
-
 /* -(  PhabricatorDestructibleInterface  )----------------------------------- */
 
 
@@ -183,6 +164,12 @@ final class PhabricatorDashboardPanel
       id(new PhabricatorDashboardPanelNgrams())
         ->setValue($this->getName()),
     );
+  }
+
+/* -(  PhabricatorDashboardPanelContainerInterface  )------------------------ */
+
+  public function getDashboardPanelContainerPanelPHIDs() {
+    return $this->requireImplementation()->getSubpanelPHIDs($this);
   }
 
 }

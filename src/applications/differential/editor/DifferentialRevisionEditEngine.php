@@ -63,6 +63,10 @@ final class DifferentialRevisionEditEngine
     return $object->getMonogram();
   }
 
+  public function getCreateURI($form_key) {
+    return '/differential/diff/create/';
+  }
+
   protected function getObjectCreateShortText() {
     return pht('Create Revision');
   }
@@ -233,6 +237,32 @@ final class DifferentialRevisionEditEngine
       ->setDescription(pht('Tasks associated with this revision.'))
       ->setConduitDescription(pht('Change associated tasks.'))
       ->setConduitTypeDescription(pht('List of tasks.'))
+      ->setValue(array());
+
+    $fields[] = id(new PhabricatorHandlesEditField())
+      ->setKey('parents')
+      ->setUseEdgeTransactions(true)
+      ->setIsFormField(false)
+      ->setTransactionType(PhabricatorTransactions::TYPE_EDGE)
+      ->setMetadataValue(
+        'edge:type',
+        DifferentialRevisionDependsOnRevisionEdgeType::EDGECONST)
+      ->setDescription(pht('Parent revisions of this revision.'))
+      ->setConduitDescription(pht('Change associated parent revisions.'))
+      ->setConduitTypeDescription(pht('List of revisions.'))
+      ->setValue(array());
+
+    $fields[] = id(new PhabricatorHandlesEditField())
+      ->setKey('children')
+      ->setUseEdgeTransactions(true)
+      ->setIsFormField(false)
+      ->setTransactionType(PhabricatorTransactions::TYPE_EDGE)
+      ->setMetadataValue(
+        'edge:type',
+        DifferentialRevisionDependedOnByRevisionEdgeType::EDGECONST)
+      ->setDescription(pht('Child revisions of this revision.'))
+      ->setConduitDescription(pht('Change associated child revisions.'))
+      ->setConduitTypeDescription(pht('List of revisions.'))
       ->setValue(array());
 
     $actions = DifferentialRevisionActionTransaction::loadAllActions();

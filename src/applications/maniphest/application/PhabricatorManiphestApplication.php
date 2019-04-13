@@ -54,7 +54,7 @@ final class PhabricatorManiphestApplication extends PhabricatorApplication {
             => 'ManiphestTaskEditController',
           'subtask/(?P<id>[1-9]\d*)/' => 'ManiphestTaskSubtaskController',
         ),
-        'subpriority/' => 'ManiphestSubpriorityController',
+        'graph/(?P<id>[1-9]\d*)/' => 'ManiphestTaskGraphController',
       ),
     );
   }

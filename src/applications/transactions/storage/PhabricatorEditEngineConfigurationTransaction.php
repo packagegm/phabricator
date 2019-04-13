@@ -23,10 +23,6 @@ final class PhabricatorEditEngineConfigurationTransaction
     return PhabricatorEditEngineConfigurationPHIDType::TYPECONST;
   }
 
-  public function getApplicationTransactionCommentObject() {
-    return null;
-  }
-
   public function getTitle() {
     $author_phid = $this->getAuthorPHID();
 
@@ -153,5 +149,19 @@ final class PhabricatorEditEngineConfigurationTransaction
     return parent::getIcon();
   }
 
+  protected function newRemarkupChanges() {
+    $changes = array();
+
+    $type = $this->getTransactionType();
+    switch ($type) {
+      case self::TYPE_PREAMBLE:
+        $changes[] = $this->newRemarkupChange()
+          ->setOldValue($this->getOldValue())
+          ->setNewValue($this->getNewValue());
+        break;
+    }
+
+    return $changes;
+  }
 
 }

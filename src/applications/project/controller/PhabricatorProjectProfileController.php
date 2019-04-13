@@ -51,6 +51,12 @@ final class PhabricatorProjectProfileController
     $watch_action = $this->renderWatchAction($project);
     $header->addActionLink($watch_action);
 
+    $subtype = $project->newSubtypeObject();
+    if ($subtype && $subtype->hasTagView()) {
+      $subtype_tag = $subtype->newTagView();
+      $header->addTag($subtype_tag);
+    }
+
     $milestone_list = $this->buildMilestoneList($project);
     $subproject_list = $this->buildSubprojectList($project);
 
@@ -68,8 +74,9 @@ final class PhabricatorProjectProfileController
       ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
       ->setUserPHIDs($project->getWatcherPHIDs());
 
-    $nav = $this->getProfileMenu();
-    $nav->selectFilter(PhabricatorProject::ITEM_PROFILE);
+    $nav = $this->newNavigation(
+      $project,
+      PhabricatorProject::ITEM_PROFILE);
 
     $stories = id(new PhabricatorFeedQuery())
       ->setViewer($viewer)

@@ -172,8 +172,9 @@ final class PhabricatorProjectBoardViewController
         return $content;
       }
 
-      $nav = $this->getProfileMenu();
-      $nav->selectFilter(PhabricatorProject::ITEM_WORKBOARD);
+      $nav = $this->newNavigation(
+        $project,
+        PhabricatorProject::ITEM_WORKBOARD);
 
       $crumbs = $this->buildApplicationCrumbs();
       $crumbs->addTextCrumb(pht('Workboard'));
@@ -284,7 +285,7 @@ final class PhabricatorProjectBoardViewController
       $query_key = $saved_query->getQueryKey();
 
       $bulk_uri = new PhutilURI("/maniphest/bulk/query/{$query_key}/");
-      $bulk_uri->setQueryParam('board', $this->id);
+      $bulk_uri->replaceQueryParam('board', $this->id);
 
       return id(new AphrontRedirectResponse())
         ->setURI($bulk_uri);
@@ -328,7 +329,7 @@ final class PhabricatorProjectBoardViewController
       $columns = null;
       $errors = array();
 
-      if ($request->isFormPost()) {
+      if ($request->isFormOrHiSecPost()) {
         $move_project_phid = head($request->getArr('moveProjectPHID'));
         if (!$move_project_phid) {
           $move_project_phid = $request->getStr('moveProjectPHID');
@@ -425,7 +426,8 @@ final class PhabricatorProjectBoardViewController
             ->setActor($viewer)
             ->setContinueOnMissingFields(true)
             ->setContinueOnNoEffect(true)
-            ->setContentSourceFromRequest($request);
+            ->setContentSourceFromRequest($request)
+            ->setCancelURI($cancel_uri);
 
           $editor->applyTransactions($move_task, $xactions);
         }
@@ -522,13 +524,6 @@ final class PhabricatorProjectBoardViewController
         $column->getPHID());
 
       $column_tasks = array_select_keys($tasks, $task_phids);
-
-      // If we aren't using "natural" order, reorder the column by the original
-      // query order.
-      if ($this->sortKey != PhabricatorProjectColumn::ORDER_NATURAL) {
-        $column_tasks = array_select_keys($column_tasks, array_keys($tasks));
-      }
-
       $column_phid = $column->getPHID();
 
       $visible_columns[$column_phid] = $column;
@@ -546,8 +541,9 @@ final class PhabricatorProjectBoardViewController
       ->setExcludedProjectPHIDs($select_phids);
 
     $templates = array();
-    $column_maps = array();
     $all_tasks = array();
+    $column_templates = array();
+    $sounds = array();
     foreach ($visible_columns as $column_phid => $column) {
       $column_tasks = $column_phids[$column_phid];
 
@@ -580,6 +576,16 @@ final class PhabricatorProjectBoardViewController
       $column_menu = $this->buildColumnMenu($project, $column);
       $panel->addHeaderAction($column_menu);
 
+      if ($column->canHaveTrigger()) {
+        $trigger = $column->getTrigger();
+        if ($trigger) {
+          $trigger->setViewer($viewer);
+        }
+
+        $trigger_menu = $this->buildTriggerMenu($column);
+        $panel->addHeaderAction($trigger_menu);
+      }
+
       $count_tag = id(new PHUITagView())
         ->setType(PHUITagView::TYPE_SHADE)
         ->setColor(PHUITagView::COLOR_BLUE)
@@ -607,18 +613,68 @@ final class PhabricatorProjectBoardViewController
             'pointLimit' => $column->getPointLimit(),
           ));
 
+      $card_phids = array();
       foreach ($column_tasks as $task) {
         $object_phid = $task->getPHID();
 
         $card = $rendering_engine->renderCard($object_phid);
         $templates[$object_phid] = hsprintf('%s', $card->getItem());
-        $column_maps[$column_phid][] = $object_phid;
+        $card_phids[] = $object_phid;
 
         $all_tasks[$object_phid] = $task;
       }
 
       $panel->setCards($cards);
       $board->addPanel($panel);
+
+      $drop_effects = $column->getDropEffects();
+      $drop_effects = mpull($drop_effects, 'toDictionary');
+
+      $preview_effect = null;
+      if ($column->canHaveTrigger()) {
+        $trigger = $column->getTrigger();
+        if ($trigger) {
+          $preview_effect = $trigger->getPreviewEffect()
+            ->toDictionary();
+
+          foreach ($trigger->getSoundEffects() as $sound) {
+            $sounds[] = $sound;
+          }
+        }
+      }
+
+      $column_templates[] = array(
+        'columnPHID' => $column_phid,
+        'effects' => $drop_effects,
+        'cardPHIDs' => $card_phids,
+        'triggerPreviewEffect' => $preview_effect,
+      );
+    }
+
+    $order_key = $this->sortKey;
+
+    $ordering_map = PhabricatorProjectColumnOrder::getEnabledOrders();
+    $ordering = id(clone $ordering_map[$order_key])
+      ->setViewer($viewer);
+
+    $headers = $ordering->getHeadersForObjects($all_tasks);
+    $headers = mpull($headers, 'toDictionary');
+
+    $vectors = $ordering->getSortVectorsForObjects($all_tasks);
+    $vector_map = array();
+    foreach ($vectors as $task_phid => $vector) {
+      $vector_map[$task_phid][$order_key] = $vector;
+    }
+
+    $header_keys = $ordering->getHeaderKeysForObjects($all_tasks);
+
+    $order_maps = array();
+    $order_maps[] = $ordering->toDictionary();
+
+    $properties = array();
+    foreach ($all_tasks as $task) {
+      $properties[$task->getPHID()] =
+        PhabricatorBoardResponseEngine::newTaskProperties($task);
     }
 
     $behavior_config = array(
@@ -630,21 +686,25 @@ final class PhabricatorProjectBoardViewController
 
       'boardPHID' => $project->getPHID(),
       'order' => $this->sortKey,
+      'orders' => $order_maps,
+      'headers' => $headers,
+      'headerKeys' => $header_keys,
       'templateMap' => $templates,
-      'columnMaps' => $column_maps,
-      'orderMaps' => mpull($all_tasks, 'getWorkboardOrderVectors'),
-      'propertyMaps' => mpull($all_tasks, 'getWorkboardProperties'),
+      'orderMaps' => $vector_map,
+      'propertyMaps' => $properties,
+      'columnTemplates' => $column_templates,
 
       'boardID' => $board_id,
       'projectPHID' => $project->getPHID(),
+      'preloadSounds' => $sounds,
     );
     $this->initBehavior('project-boards', $behavior_config);
-
 
     $sort_menu = $this->buildSortMenu(
       $viewer,
       $project,
-      $this->sortKey);
+      $this->sortKey,
+      $ordering_map);
 
     $filter_menu = $this->buildFilterMenu(
       $viewer,
@@ -666,13 +726,15 @@ final class PhabricatorProjectBoardViewController
       ->appendChild($board)
       ->addClass('project-board-wrapper');
 
-    $nav = $this->getProfileMenu();
+    $nav = $this->newNavigation(
+      $project,
+      PhabricatorProject::ITEM_WORKBOARD);
 
     $divider = id(new PHUIListItemView())
       ->setType(PHUIListItemView::TYPE_DIVIDER);
     $fullscreen = $this->buildFullscreenMenu();
 
-    $crumbs = $this->buildApplicationCrumbs();
+    $crumbs = $this->newWorkboardCrumbs();
     $crumbs->addTextCrumb(pht('Workboard'));
     $crumbs->setBorder(true);
 
@@ -739,7 +801,7 @@ final class PhabricatorProjectBoardViewController
       return $default_sort;
     }
 
-    return PhabricatorProjectColumn::DEFAULT_ORDER;
+    return PhabricatorProjectColumnNaturalOrder::ORDERKEY;
   }
 
   private function getDefaultFilter(PhabricatorProject $project) {
@@ -753,41 +815,37 @@ final class PhabricatorProjectBoardViewController
   }
 
   private function isValidSort($sort) {
-    switch ($sort) {
-      case PhabricatorProjectColumn::ORDER_NATURAL:
-      case PhabricatorProjectColumn::ORDER_PRIORITY:
-        return true;
-    }
-
-    return false;
+    $map = PhabricatorProjectColumnOrder::getEnabledOrders();
+    return isset($map[$sort]);
   }
 
   private function buildSortMenu(
     PhabricatorUser $viewer,
     PhabricatorProject $project,
-    $sort_key) {
-
-    $sort_icon = id(new PHUIIconView())
-      ->setIcon('fa-sort-amount-asc bluegrey');
-
-    $named = array(
-      PhabricatorProjectColumn::ORDER_NATURAL => pht('Natural'),
-      PhabricatorProjectColumn::ORDER_PRIORITY => pht('Sort by Priority'),
-    );
+    $sort_key,
+    array $ordering_map) {
 
     $base_uri = $this->getURIWithState();
 
     $items = array();
-    foreach ($named as $key => $name) {
-      $is_selected = ($key == $sort_key);
+    foreach ($ordering_map as $key => $ordering) {
+      // TODO: It would be desirable to build a real "PHUIIconView" here, but
+      // the pathway for threading that through all the view classes ends up
+      // being fairly complex, since some callers read the icon out of other
+      // views. For now, just stick with a string.
+      $ordering_icon = $ordering->getMenuIconIcon();
+      $ordering_name = $ordering->getDisplayName();
+
+      $is_selected = ($key === $sort_key);
       if ($is_selected) {
-        $active_order = $name;
+        $active_name = $ordering_name;
+        $active_icon = $ordering_icon;
       }
 
       $item = id(new PhabricatorActionView())
-        ->setIcon('fa-sort-amount-asc')
+        ->setIcon($ordering_icon)
         ->setSelected($is_selected)
-        ->setName($name);
+        ->setName($ordering_name);
 
       $uri = $base_uri->alter('order', $key);
       $item->setHref($uri);
@@ -807,6 +865,9 @@ final class PhabricatorProjectBoardViewController
       PhabricatorPolicyCapability::CAN_EDIT);
 
     $items[] = id(new PhabricatorActionView())
+      ->setType(PhabricatorActionView::TYPE_DIVIDER);
+
+    $items[] = id(new PhabricatorActionView())
       ->setIcon('fa-floppy-o')
       ->setName(pht('Save as Default'))
       ->setHref($save_uri)
@@ -820,8 +881,8 @@ final class PhabricatorProjectBoardViewController
     }
 
     $sort_button = id(new PHUIListItemView())
-      ->setName($active_order)
-      ->setIcon('fa-sort-amount-asc')
+      ->setName($active_name)
+      ->setIcon($active_icon)
       ->setHref('#')
       ->addSigil('boards-dropdown-menu')
       ->setMetadata(
@@ -878,7 +939,7 @@ final class PhabricatorProjectBoardViewController
       }
 
       $uri = $this->getURIWithState($uri)
-        ->setQueryParam('filter', null);
+        ->removeQueryParam('filter');
       $item->setHref($uri);
 
       $items[] = $item;
@@ -903,6 +964,9 @@ final class PhabricatorProjectBoardViewController
       $viewer,
       $project,
       PhabricatorPolicyCapability::CAN_EDIT);
+
+    $items[] = id(new PhabricatorActionView())
+      ->setType(PhabricatorActionView::TYPE_DIVIDER);
 
     $items[] = id(new PhabricatorActionView())
       ->setIcon('fa-floppy-o')
@@ -966,12 +1030,12 @@ final class PhabricatorProjectBoardViewController
 
     if ($show_hidden) {
       $hidden_uri = $this->getURIWithState()
-        ->setQueryParam('hidden', null);
+        ->removeQueryParam('hidden');
       $hidden_icon = 'fa-eye-slash';
       $hidden_text = pht('Hide Hidden Columns');
     } else {
       $hidden_uri = $this->getURIWithState()
-        ->setQueryParam('hidden', 'true');
+        ->replaceQueryParam('hidden', 'true');
       $hidden_icon = 'fa-eye';
       $hidden_text = pht('Show Hidden Columns');
     }
@@ -999,7 +1063,7 @@ final class PhabricatorProjectBoardViewController
       ->setHref($manage_uri);
 
     $batch_edit_uri = $request->getRequestURI();
-    $batch_edit_uri->setQueryParam('batch', self::BATCH_EDIT_ALL);
+    $batch_edit_uri->replaceQueryParam('batch', self::BATCH_EDIT_ALL);
     $can_batch_edit = PhabricatorPolicyFilter::hasCapability(
       $viewer,
       PhabricatorApplication::getByClass('PhabricatorManiphestApplication'),
@@ -1084,13 +1148,11 @@ final class PhabricatorProjectBoardViewController
           ));
     }
 
-    if (count($specs) > 1) {
-      $column_items[] = id(new PhabricatorActionView())
-        ->setType(PhabricatorActionView::TYPE_DIVIDER);
-    }
+    $column_items[] = id(new PhabricatorActionView())
+      ->setType(PhabricatorActionView::TYPE_DIVIDER);
 
     $batch_edit_uri = $request->getRequestURI();
-    $batch_edit_uri->setQueryParam('batch', $column->getID());
+    $batch_edit_uri->replaceQueryParam('batch', $column->getID());
     $can_batch_edit = PhabricatorPolicyFilter::hasCapability(
       $viewer,
       PhabricatorApplication::getByClass('PhabricatorManiphestApplication'),
@@ -1103,7 +1165,7 @@ final class PhabricatorProjectBoardViewController
       ->setDisabled(!$can_batch_edit);
 
     $batch_move_uri = $request->getRequestURI();
-    $batch_move_uri->setQueryParam('move', $column->getID());
+    $batch_move_uri->replaceQueryParam('move', $column->getID());
     $column_items[] = id(new PhabricatorActionView())
       ->setIcon('fa-arrow-right')
       ->setName(pht('Move Tasks to Column...'))
@@ -1111,7 +1173,7 @@ final class PhabricatorProjectBoardViewController
       ->setWorkflow(true);
 
     $query_uri = $request->getRequestURI();
-    $query_uri->setQueryParam('queryColumnID', $column->getID());
+    $query_uri->replaceQueryParam('queryColumnID', $column->getID());
 
     $column_items[] = id(new PhabricatorActionView())
       ->setName(pht('View as Query'))
@@ -1154,7 +1216,7 @@ final class PhabricatorProjectBoardViewController
     }
 
     $column_button = id(new PHUIIconView())
-      ->setIcon('fa-caret-down')
+      ->setIcon('fa-pencil')
       ->setHref('#')
       ->addSigil('boards-dropdown-menu')
       ->setMetadata(
@@ -1165,6 +1227,75 @@ final class PhabricatorProjectBoardViewController
     return $column_button;
   }
 
+  private function buildTriggerMenu(PhabricatorProjectColumn $column) {
+    $viewer = $this->getViewer();
+    $trigger = $column->getTrigger();
+
+    $can_edit = PhabricatorPolicyFilter::hasCapability(
+      $viewer,
+      $column,
+      PhabricatorPolicyCapability::CAN_EDIT);
+
+    $trigger_items = array();
+    if (!$trigger) {
+      $set_uri = $this->getApplicationURI(
+        new PhutilURI(
+          'trigger/edit/',
+          array(
+            'columnPHID' => $column->getPHID(),
+          )));
+
+      $trigger_items[] = id(new PhabricatorActionView())
+        ->setIcon('fa-cogs')
+        ->setName(pht('New Trigger...'))
+        ->setHref($set_uri)
+        ->setDisabled(!$can_edit);
+    } else {
+      $trigger_items[] = id(new PhabricatorActionView())
+        ->setIcon('fa-cogs')
+        ->setName(pht('View Trigger'))
+        ->setHref($trigger->getURI())
+        ->setDisabled(!$can_edit);
+    }
+
+    $remove_uri = $this->getApplicationURI(
+      new PhutilURI(
+        urisprintf(
+          'column/remove/%d/',
+          $column->getID())));
+
+    $trigger_items[] = id(new PhabricatorActionView())
+      ->setIcon('fa-times')
+      ->setName(pht('Remove Trigger'))
+      ->setHref($remove_uri)
+      ->setWorkflow(true)
+      ->setDisabled(!$can_edit || !$trigger);
+
+    $trigger_menu = id(new PhabricatorActionListView())
+      ->setUser($viewer);
+    foreach ($trigger_items as $item) {
+      $trigger_menu->addAction($item);
+    }
+
+    if ($trigger) {
+      $trigger_icon = 'fa-cogs';
+    } else {
+      $trigger_icon = 'fa-cogs grey';
+    }
+
+    $trigger_button = id(new PHUIIconView())
+      ->setIcon($trigger_icon)
+      ->setHref('#')
+      ->addSigil('boards-dropdown-menu')
+      ->addSigil('trigger-preview')
+      ->setMetadata(
+        array(
+          'items' => hsprintf('%s', $trigger_menu),
+          'columnPHID' => $column->getPHID(),
+        ));
+
+    return $trigger_button;
+  }
 
   /**
    * Add current state parameters (like order and the visibility of hidden
@@ -1182,24 +1313,36 @@ final class PhabricatorProjectBoardViewController
     $project = $this->getProject();
 
     if ($base === null) {
-      $base = $this->getRequest()->getRequestURI();
+      $base = $this->getRequest()->getPath();
     }
 
     $base = new PhutilURI($base);
 
     if ($force || ($this->sortKey != $this->getDefaultSort($project))) {
-      $base->setQueryParam('order', $this->sortKey);
+      if ($this->sortKey !== null) {
+        $base->replaceQueryParam('order', $this->sortKey);
+      } else {
+        $base->removeQueryParam('order');
+      }
     } else {
-      $base->setQueryParam('order', null);
+      $base->removeQueryParam('order');
     }
 
     if ($force || ($this->queryKey != $this->getDefaultFilter($project))) {
-      $base->setQueryParam('filter', $this->queryKey);
+      if ($this->queryKey !== null) {
+        $base->replaceQueryParam('filter', $this->queryKey);
+      } else {
+        $base->removeQueryParam('filter');
+      }
     } else {
-      $base->setQueryParam('filter', null);
+      $base->removeQueryParam('filter');
     }
 
-    $base->setQueryParam('hidden', $this->showHidden ? 'true' : null);
+    if ($this->showHidden) {
+      $base->replaceQueryParam('hidden', 'true');
+    } else {
+      $base->removeQueryParam('hidden');
+    }
 
     return $base;
   }

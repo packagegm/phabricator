@@ -165,14 +165,29 @@ abstract class PhabricatorEditEngine
       $extensions = array();
     }
 
+    // See T13248. Create a template object to provide to extensions. We
+    // adjust the template to have the intended subtype, so that extensions
+    // may change behavior based on the form subtype.
+
+    $template_object = clone $object;
+    if ($this->getIsCreate()) {
+      if ($this->supportsSubtypes()) {
+        $config = $this->getEditEngineConfiguration();
+        $subtype = $config->getSubtype();
+        $template_object->setSubtype($subtype);
+      }
+    }
+
     foreach ($extensions as $extension) {
       $extension->setViewer($viewer);
 
-      if (!$extension->supportsObject($this, $object)) {
+      if (!$extension->supportsObject($this, $template_object)) {
         continue;
       }
 
-      $extension_fields = $extension->buildCustomEditFields($this, $object);
+      $extension_fields = $extension->buildCustomEditFields(
+        $this,
+        $template_object);
 
       // TODO: Validate this in more detail with a more tailored error.
       assert_instances_of($extension_fields, 'PhabricatorEditField');
@@ -551,6 +566,18 @@ abstract class PhabricatorEditEngine
     return $this->getObjectViewURI($object);
   }
 
+  /**
+   * @task uri
+   */
+  public function getCreateURI($form_key) {
+    try {
+      $create_uri = $this->getEditURI(null, "form/{$form_key}/");
+    } catch (Exception $ex) {
+      $create_uri = null;
+    }
+
+    return $create_uri;
+  }
 
   /**
    * @task uri
@@ -1249,6 +1276,8 @@ abstract class PhabricatorEditEngine
       $view->setHeader($page_header);
     }
 
+    $view->setFooter($content);
+
     $page = $controller->newPage()
       ->setTitle($header_text)
       ->setCrumbs($crumbs)
@@ -1256,11 +1285,7 @@ abstract class PhabricatorEditEngine
 
     $navigation = $this->getNavigation();
     if ($navigation) {
-      $view->setFixed(true);
-      $view->setNavigation($navigation);
-      $view->setMainColumn($content);
-    } else {
-      $view->setFooter($content);
+      $page->setNavigation($navigation);
     }
 
     return $page;
@@ -1281,12 +1306,38 @@ abstract class PhabricatorEditEngine
 
     $fields = $this->willBuildEditForm($object, $fields);
 
+    $request_path = $request->getPath();
+
     $form = id(new AphrontFormView())
       ->setUser($viewer)
+      ->setAction($request_path)
       ->addHiddenInput('editEngine', 'true');
 
     foreach ($this->contextParameters as $param) {
       $form->addHiddenInput($param, $request->getStr($param));
+    }
+
+    $requires_mfa = false;
+    if ($object instanceof PhabricatorEditEngineMFAInterface) {
+      $mfa_engine = PhabricatorEditEngineMFAEngine::newEngineForObject($object)
+        ->setViewer($viewer);
+      $requires_mfa = $mfa_engine->shouldRequireMFA();
+    }
+
+    if ($requires_mfa) {
+      $message = pht(
+        'You will be required to provide multi-factor credentials to make '.
+        'changes.');
+      $form->appendChild(
+        id(new PHUIInfoView())
+          ->setSeverity(PHUIInfoView::SEVERITY_MFA)
+          ->setErrors(array($message)));
+
+      // TODO: This should also set workflow on the form, so the user doesn't
+      // lose any form data if they "Cancel". However, Maniphest currently
+      // overrides "newEditResponse()" if the request is Ajax and returns a
+      // bag of view data. This can reasonably be cleaned up when workboards
+      // get their next iteration.
     }
 
     foreach ($fields as $field) {
@@ -1517,8 +1568,7 @@ abstract class PhabricatorEditEngine
         $config_uri = $config->getCreateURI();
 
         if ($parameters) {
-          $config_uri = (string)id(new PhutilURI($config_uri))
-            ->setQueryParams($parameters);
+          $config_uri = (string)new PhutilURI($config_uri, $parameters);
         }
 
         $specs[] = array(
@@ -1567,11 +1617,19 @@ abstract class PhabricatorEditEngine
 
     $comment_uri = $this->getEditURI($object, 'comment/');
 
+    $requires_mfa = false;
+    if ($object instanceof PhabricatorEditEngineMFAInterface) {
+      $mfa_engine = PhabricatorEditEngineMFAEngine::newEngineForObject($object)
+        ->setViewer($viewer);
+      $requires_mfa = $mfa_engine->shouldRequireMFA();
+    }
+
     $view = id(new PhabricatorApplicationTransactionCommentView())
       ->setUser($viewer)
       ->setObjectPHID($object_phid)
       ->setHeaderText($header_text)
       ->setAction($comment_uri)
+      ->setRequiresMFA($requires_mfa)
       ->setSubmitButtonName($button_text);
 
     $draft = PhabricatorVersionedDraft::loadDraft(

@@ -11,9 +11,17 @@ final class PhabricatorDashboardRenderingEngine extends Phobject {
     return $this;
   }
 
+  public function getViewer() {
+    return $this->viewer;
+  }
+
   public function setDashboard(PhabricatorDashboard $dashboard) {
     $this->dashboard = $dashboard;
     return $this;
+  }
+
+  public function getDashboard() {
+    return $this->dashboard;
   }
 
   public function setArrangeMode($mode) {
@@ -26,6 +34,8 @@ final class PhabricatorDashboardRenderingEngine extends Phobject {
     $dashboard = $this->dashboard;
     $viewer = $this->viewer;
 
+    $is_editable = $this->arrangeMode;
+
     $layout_config = $dashboard->getLayoutConfigObject();
     $panel_grid_locations = $layout_config->getPanelLocations();
     $panels = mpull($dashboard->getPanels(), null, 'getPHID');
@@ -35,11 +45,19 @@ final class PhabricatorDashboardRenderingEngine extends Phobject {
       ->setFluidLayout(true)
       ->setGutter(AphrontMultiColumnView::GUTTER_LARGE);
 
-    if ($this->arrangeMode) {
+    if ($is_editable) {
       $h_mode = PhabricatorDashboardPanelRenderingEngine::HEADER_MODE_EDIT;
     } else {
       $h_mode = PhabricatorDashboardPanelRenderingEngine::HEADER_MODE_NORMAL;
     }
+
+    $panel_phids = array();
+    foreach ($panel_grid_locations as $panel_column_locations) {
+      foreach ($panel_column_locations as $panel_phid) {
+        $panel_phids[] = $panel_phid;
+      }
+    }
+    $handles = $viewer->loadHandles($panel_phids);
 
     foreach ($panel_grid_locations as $column => $panel_column_locations) {
       $panel_phids = $panel_column_locations;
@@ -55,9 +73,12 @@ final class PhabricatorDashboardRenderingEngine extends Phobject {
           ->setViewer($viewer)
           ->setDashboardID($dashboard->getID())
           ->setEnableAsyncRendering(true)
+          ->setContextObject($dashboard)
           ->setPanelPHID($panel_phid)
           ->setParentPanelPHIDs(array())
-          ->setHeaderMode($h_mode);
+          ->setHeaderMode($h_mode)
+          ->setEditMode($is_editable)
+          ->setPanelHandle($handles[$panel_phid]);
 
         $panel = idx($panels, $panel_phid);
         if ($panel) {
@@ -68,8 +89,8 @@ final class PhabricatorDashboardRenderingEngine extends Phobject {
       }
       $column_class = $layout_config->getColumnClass(
         $column,
-        $this->arrangeMode);
-      if ($this->arrangeMode) {
+        $is_editable);
+      if ($is_editable) {
         $column_result[] = $this->renderAddPanelPlaceHolder($column);
         $column_result[] = $this->renderAddPanelUI($column);
       }
@@ -80,7 +101,7 @@ final class PhabricatorDashboardRenderingEngine extends Phobject {
         $metadata = array('columnID' => $column));
     }
 
-    if ($this->arrangeMode) {
+    if ($is_editable) {
       Javelin::initBehavior(
         'dashboard-move-panels',
         array(
@@ -91,7 +112,10 @@ final class PhabricatorDashboardRenderingEngine extends Phobject {
 
     $view = id(new PHUIBoxView())
       ->addClass('dashboard-view')
-      ->appendChild($result);
+      ->appendChild(
+        array(
+          $result,
+        ));
 
     return $view;
   }
@@ -112,12 +136,12 @@ final class PhabricatorDashboardRenderingEngine extends Phobject {
   private function renderAddPanelUI($column) {
     $dashboard_id = $this->dashboard->getID();
 
-    $create_uri = id(new PhutilURI('/dashboard/panel/create/'))
-      ->setQueryParam('dashboardID', $dashboard_id)
-      ->setQueryParam('column', $column);
+    $create_uri = id(new PhutilURI('/dashboard/panel/edit/'))
+      ->replaceQueryParam('dashboardID', $dashboard_id)
+      ->replaceQueryParam('columnID', $column);
 
     $add_uri = id(new PhutilURI('/dashboard/addpanel/'.$dashboard_id.'/'))
-      ->setQueryParam('column', $column);
+      ->replaceQueryParam('columnID', $column);
 
     $create_button = id(new PHUIButtonView())
       ->setTag('a')

@@ -6,6 +6,7 @@
 abstract class PhabricatorLiskDAO extends LiskDAO {
 
   private static $namespaceStack = array();
+  private $forcedNamespace;
 
   const ATTACHABLE = '<attachable>';
   const CONFIG_APPLICATION_SERIALIZERS = 'phabricator/serializers';
@@ -45,6 +46,11 @@ abstract class PhabricatorLiskDAO extends LiskDAO {
       throw new Exception(pht('No storage namespace configured!'));
     }
     return $namespace;
+  }
+
+  public function setForcedStorageNamespace($namespace) {
+    $this->forcedNamespace = $namespace;
+    return $this;
   }
 
   /**
@@ -104,6 +110,19 @@ abstract class PhabricatorLiskDAO extends LiskDAO {
       $connection = $replica->newApplicationConnection($database);
       $connection->setReadOnly(true);
       if ($replica->isReachable($connection)) {
+        if ($master_exception) {
+          // If we ended up here as the result of a failover, log the
+          // exception. This is seriously bad news even if we are able
+          // to recover from it.
+          $proxy_exception = new PhutilProxyException(
+            pht(
+              'Failed to connect to master database ("%s"), failing over '.
+              'into read-only mode.',
+              $database),
+            $master_exception);
+          phlog($proxy_exception);
+        }
+
         return $connection;
       }
     }
@@ -188,7 +207,13 @@ abstract class PhabricatorLiskDAO extends LiskDAO {
   abstract public function getApplicationName();
 
   protected function getDatabaseName() {
-    return self::getStorageNamespace().'_'.$this->getApplicationName();
+    if ($this->forcedNamespace) {
+      $namespace = $this->forcedNamespace;
+    } else {
+      $namespace = self::getStorageNamespace();
+    }
+
+    return $namespace.'_'.$this->getApplicationName();
   }
 
   /**

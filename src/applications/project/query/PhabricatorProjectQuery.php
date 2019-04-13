@@ -24,6 +24,7 @@ final class PhabricatorProjectQuery
   private $maxDepth;
   private $minMilestoneNumber;
   private $maxMilestoneNumber;
+  private $subtypes;
 
   private $status       = 'status-any';
   const STATUS_ANY      = 'status-any';
@@ -131,6 +132,11 @@ final class PhabricatorProjectQuery
     return $this;
   }
 
+  public function withSubtypes(array $subtypes) {
+    $this->subtypes = $subtypes;
+    return $this;
+  }
+
   public function needMembers($need_members) {
     $this->needMembers = $need_members;
     return $this;
@@ -195,12 +201,11 @@ final class PhabricatorProjectQuery
     );
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $project = $this->loadCursorObject($cursor);
+  protected function newPagingMapFromPartialObject($object) {
     return array(
-      'id' => $project->getID(),
-      'name' => $project->getName(),
-      'status' => $project->getStatus(),
+      'id' => (int)$object->getID(),
+      'name' => $object->getName(),
+      'status' => $object->getStatus(),
     );
   }
 
@@ -616,6 +621,13 @@ final class PhabricatorProjectQuery
         $conn,
         'milestoneNumber <= %d',
         $this->maxMilestoneNumber);
+    }
+
+    if ($this->subtypes !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'subtype IN (%Ls)',
+        $this->subtypes);
     }
 
     return $where;

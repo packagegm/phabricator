@@ -10,7 +10,8 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
     PhabricatorFlaggableInterface,
     PhabricatorDestructibleInterface,
     PhabricatorProjectInterface,
-    PhabricatorNgramsInterface {
+    PhabricatorNgramsInterface,
+    PhabricatorDashboardPanelContainerInterface {
 
   protected $name;
   protected $authorPHID;
@@ -67,6 +68,27 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
       PhabricatorDashboardDashboardPHIDType::TYPECONST);
   }
 
+  public function getRawLayoutMode() {
+    $config = $this->getRawLayoutConfig();
+    return idx($config, 'layoutMode');
+  }
+
+  public function setRawLayoutMode($mode) {
+    $config = $this->getRawLayoutConfig();
+    $config['layoutMode'] = $mode;
+    return $this->setLayoutConfig($config);
+  }
+
+  private function getRawLayoutConfig() {
+    $config = $this->getLayoutConfig();
+
+    if (!is_array($config)) {
+      $config = array();
+    }
+
+    return $config;
+  }
+
   public function getLayoutConfigObject() {
     return PhabricatorDashboardLayoutConfig::newFromDictionary(
       $this->getLayoutConfig());
@@ -118,10 +140,13 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
     return ($this->getStatus() == self::STATUS_ARCHIVED);
   }
 
-  public function getViewURI() {
-    return '/dashboard/view/'.$this->getID().'/';
+  public function getURI() {
+    return urisprintf('/dashboard/view/%d/', $this->getID());
   }
 
+  public function getObjectName() {
+    return pht('Dashboard %d', $this->getID());
+  }
 
 /* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
 
@@ -186,6 +211,14 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
       id(new PhabricatorDashboardNgrams())
         ->setValue($this->getName()),
     );
+  }
+
+/* -(  PhabricatorDashboardPanelContainerInterface  )------------------------ */
+
+  public function getDashboardPanelContainerPanelPHIDs() {
+    return PhabricatorEdgeQuery::loadDestinationPHIDs(
+      $this->getPHID(),
+      PhabricatorDashboardDashboardHasPanelEdgeType::EDGECONST);
   }
 
 }

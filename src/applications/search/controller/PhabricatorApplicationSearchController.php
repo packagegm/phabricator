@@ -196,9 +196,6 @@ final class PhabricatorApplicationSearchController
       $submit->addButton($save_button);
     }
 
-    // TODO: A "Create Dashboard Panel" action goes here somewhere once
-    // we sort out T5307.
-
     $form->appendChild($submit);
     $body = array();
 
@@ -249,6 +246,8 @@ final class PhabricatorApplicationSearchController
         $pager = $engine->newPagerForSavedQuery($saved_query);
         $pager->readFromRequest($request);
 
+        $query->setReturnPartialResultsOnOverheat(true);
+
         $objects = $engine->executeQuery($query, $pager);
 
         $force_nux = $request->getBool('nux');
@@ -274,9 +273,10 @@ final class PhabricatorApplicationSearchController
             throw new Exception(
               pht(
                 'SearchEngines must render a "%s" object, but this engine '.
-                '(of class "%s") rendered something else.',
+                '(of class "%s") rendered something else ("%s").',
                 'PhabricatorApplicationSearchResultView',
-                get_class($engine)));
+                get_class($engine),
+                phutil_describe_type($list)));
           }
 
           if ($list->getObjectList()) {
@@ -349,6 +349,8 @@ final class PhabricatorApplicationSearchController
         $exec_errors[] = $ex->getMessage();
       } catch (PhabricatorSearchConstraintException $ex) {
         $exec_errors[] = $ex->getMessage();
+      } catch (PhabricatorInvalidQueryCursorException $ex) {
+        $exec_errors[] = $ex->getMessage();
       }
 
       // The engine may have encountered additional errors during rendering;
@@ -382,7 +384,6 @@ final class PhabricatorApplicationSearchController
     require_celerity_resource('application-search-view-css');
 
     return $this->newPage()
-      ->setApplicationMenu($this->buildApplicationMenu())
       ->setTitle(pht('Query: %s', $title))
       ->setCrumbs($crumbs)
       ->setNavigation($nav)
@@ -606,7 +607,6 @@ final class PhabricatorApplicationSearchController
       ->setFooter($lists);
 
     return $this->newPage()
-      ->setApplicationMenu($this->buildApplicationMenu())
       ->setTitle(pht('Saved Queries'))
       ->setCrumbs($crumbs)
       ->setNavigation($nav)
@@ -798,6 +798,7 @@ final class PhabricatorApplicationSearchController
       $object = $query
         ->setViewer(PhabricatorUser::getOmnipotentUser())
         ->setLimit(1)
+        ->setReturnPartialResultsOnOverheat(true)
         ->execute();
       if ($object) {
         return null;
@@ -844,18 +845,30 @@ final class PhabricatorApplicationSearchController
         ));
   }
 
-  private function newOverheatedView(array $results) {
-    if ($results) {
+  public static function newOverheatedError($has_results) {
+    $overheated_link = phutil_tag(
+      'a',
+      array(
+        'href' => 'https://phurl.io/u/overheated',
+        'target' => '_blank',
+      ),
+      pht('Learn More'));
+
+    if ($has_results) {
       $message = pht(
-        'Most objects matching your query are not visible to you, so '.
-        'filtering results is taking a long time. Only some results are '.
-        'shown. Refine your query to find results more quickly.');
+        'This query took too long, so only some results are shown. %s',
+        $overheated_link);
     } else {
       $message = pht(
-        'Most objects matching your query are not visible to you, so '.
-        'filtering results is taking a long time. Refine your query to '.
-        'find results more quickly.');
+        'This query took too long. %s',
+        $overheated_link);
     }
+
+    return $message;
+  }
+
+  private function newOverheatedView(array $results) {
+    $message = self::newOverheatedError((bool)$results);
 
     return id(new PHUIInfoView())
       ->setSeverity(PHUIInfoView::SEVERITY_WARNING)
@@ -905,7 +918,7 @@ final class PhabricatorApplicationSearchController
       $engine = $this->getSearchEngine();
       $nux_uri = $engine->getQueryBaseURI();
       $nux_uri = id(new PhutilURI($nux_uri))
-        ->setQueryParam('nux', true);
+        ->replaceQueryParam('nux', true);
 
       $actions[] = id(new PhabricatorActionView())
         ->setIcon('fa-user-plus')
@@ -915,7 +928,7 @@ final class PhabricatorApplicationSearchController
 
     if ($is_dev) {
       $overheated_uri = $this->getRequest()->getRequestURI()
-        ->setQueryParam('overheated', true);
+        ->replaceQueryParam('overheated', true);
 
       $actions[] = id(new PhabricatorActionView())
         ->setIcon('fa-fire')

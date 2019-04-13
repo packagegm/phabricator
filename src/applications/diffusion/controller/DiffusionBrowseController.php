@@ -566,11 +566,8 @@ final class DiffusionBrowseController extends DiffusionController {
         $name = idx($spec, 'name', $auto);
         $item->addIcon('fa-code', $name);
 
-        if ($package->getAuditingEnabled()) {
-          $item->addIcon('fa-check', pht('Auditing Enabled'));
-        } else {
-          $item->addIcon('fa-ban', pht('No Auditing'));
-        }
+        $rule = $package->newAuditingRule();
+        $item->addIcon($rule->getIconIcon(), $rule->getDisplayName());
 
         if ($package->isArchived()) {
           $item->setDisabled(true);
@@ -712,10 +709,17 @@ final class DiffusionBrowseController extends DiffusionController {
         'path'      => $path,
       ));
 
-    $before_uri->setQueryParams($request->getRequestURI()->getQueryParams());
-    $before_uri = $before_uri->alter('before', null);
-    $before_uri = $before_uri->alter('renamed', $renamed);
-    $before_uri = $before_uri->alter('follow', $follow);
+    if ($renamed === null) {
+      $before_uri->removeQueryParam('renamed');
+    } else {
+      $before_uri->replaceQueryParam('renamed', $renamed);
+    }
+
+    if ($follow === null) {
+      $before_uri->removeQueryParam('follow');
+    } else {
+      $before_uri->replaceQueryParam('follow', $follow);
+    }
 
     return id(new AphrontRedirectResponse())->setURI($before_uri);
   }
