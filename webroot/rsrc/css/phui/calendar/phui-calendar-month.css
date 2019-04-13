@@ -197,13 +197,14 @@ li.phui-calendar-viewer-invited.all-day {
   width: auto;
   position: absolute;
   left: 16px;
-  right: 60px;
+  right: 0px;
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
 }
 
 .phui-calendar-view li.phui-calendar-list-item .phui-calendar-list-time {
+  display: none;
   position: absolute;
   top: 0;
   right: 0px;
