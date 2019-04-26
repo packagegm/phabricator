@@ -106,7 +106,7 @@ final class ManiphestTaskListView extends ManiphestView {
             if ($deadline) {
               $item->addIcon(
                 'fa-calendar-check-o',
-                phabricator_datetime($deadline, $this->getUser()));
+                phabricator_datetime($deadline, $this->getViewer()));
             }
           }
         }

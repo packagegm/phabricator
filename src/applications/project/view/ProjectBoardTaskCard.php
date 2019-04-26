@@ -151,12 +151,12 @@ final class ProjectBoardTaskCard extends Phobject {
         if ($field->getModernFieldKey() == 'custom.feature.deadline') {
           $deadline = $field->getValueForStorage();
           if ($deadline && !$task->isClosed()) {
-            $deadlineText = phabricator_date($deadline, $viewer);
+            $deadline_text = phabricator_date($deadline, $viewer);
             $fields_tag = id(new PHUITagView())
               ->setType(PHUITagView::TYPE_OBJECT)
               ->setColor(PHUITagView::COLOR_GREY)
               ->setSlimShady(true)
-              ->setName($deadlineText)
+              ->setName($deadline_text)
               ->addClass('phui-workcard-points');
             $now = time();
             $day = 86400;
@@ -169,6 +169,18 @@ final class ProjectBoardTaskCard extends Phobject {
             } else {
               $fields_tag->setColor(PHUITagView::COLOR_GREY);
             }
+            $card->addAttribute($fields_tag);
+          }
+        }
+        if ($field->getModernFieldKey() == 'custom.feature.source') {
+          $task_source = $field->getValueForStorage();
+          if ($task_source) {
+            $fields_tag = id(new PHUITagView())
+              ->setType(PHUITagView::TYPE_OBJECT)
+              ->setColor(PHUITagView::COLOR_PERSON)
+              ->setSlimShady(true)
+              ->setName($task_source);
+//              ->addClass('phui-workcard-points');
             $card->addAttribute($fields_tag);
           }
         }
