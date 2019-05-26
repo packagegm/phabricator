@@ -10,7 +10,8 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
     PhabricatorFlaggableInterface,
     PhabricatorDestructibleInterface,
     PhabricatorProjectInterface,
-    PhabricatorNgramsInterface,
+    PhabricatorFulltextInterface,
+    PhabricatorFerretInterface,
     PhabricatorDashboardPanelContainerInterface {
 
   protected $name;
@@ -24,10 +25,7 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
   const STATUS_ACTIVE = 'active';
   const STATUS_ARCHIVED = 'archived';
 
-  private $panelPHIDs = self::ATTACHABLE;
-  private $panels = self::ATTACHABLE;
-  private $edgeProjectPHIDs = self::ATTACHABLE;
-
+  private $panelRefList;
 
   public static function initializeNewDashboard(PhabricatorUser $actor) {
     return id(new PhabricatorDashboard())
@@ -36,9 +34,7 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
       ->setViewPolicy(PhabricatorPolicies::getMostOpenPolicy())
       ->setEditPolicy($actor->getPHID())
       ->setStatus(self::STATUS_ACTIVE)
-      ->setAuthorPHID($actor->getPHID())
-      ->attachPanels(array())
-      ->attachPanelPHIDs(array());
+      ->setAuthorPHID($actor->getPHID());
   }
 
   public static function getStatusNameMap() {
@@ -63,9 +59,8 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
     ) + parent::getConfiguration();
   }
 
-  public function generatePHID() {
-    return PhabricatorPHID::generateNewPHID(
-      PhabricatorDashboardDashboardPHIDType::TYPECONST);
+  public function getPHIDType() {
+    return PhabricatorDashboardDashboardPHIDType::TYPECONST;
   }
 
   public function getRawLayoutMode() {
@@ -76,7 +71,18 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
   public function setRawLayoutMode($mode) {
     $config = $this->getRawLayoutConfig();
     $config['layoutMode'] = $mode;
-    return $this->setLayoutConfig($config);
+    return $this->setRawLayoutConfig($config);
+  }
+
+  public function getRawPanels() {
+    $config = $this->getRawLayoutConfig();
+    return idx($config, 'panels');
+  }
+
+  public function setRawPanels(array $panels) {
+    $config = $this->getRawLayoutConfig();
+    $config['panels'] = $panels;
+    return $this->setRawLayoutConfig($config);
   }
 
   private function getRawLayoutConfig() {
@@ -89,51 +95,11 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
     return $config;
   }
 
-  public function getLayoutConfigObject() {
-    return PhabricatorDashboardLayoutConfig::newFromDictionary(
-      $this->getLayoutConfig());
-  }
+  private function setRawLayoutConfig(array $config) {
+    // If a cached panel ref list exists, clear it.
+    $this->panelRefList = null;
 
-  public function setLayoutConfigFromObject(
-    PhabricatorDashboardLayoutConfig $object) {
-
-    $this->setLayoutConfig($object->toDictionary());
-
-    // See PHI385. Dashboard panel mutations rely on changes to the Dashboard
-    // object persisting when transactions are applied, but this assumption is
-    // no longer valid after T13054. For now, just save the dashboard
-    // explicitly.
-    $this->save();
-
-    return $this;
-  }
-
-  public function getProjectPHIDs() {
-    return $this->assertAttached($this->edgeProjectPHIDs);
-  }
-
-  public function attachProjectPHIDs(array $phids) {
-    $this->edgeProjectPHIDs = $phids;
-    return $this;
-  }
-
-  public function attachPanelPHIDs(array $phids) {
-    $this->panelPHIDs = $phids;
-    return $this;
-  }
-
-  public function getPanelPHIDs() {
-    return $this->assertAttached($this->panelPHIDs);
-  }
-
-  public function attachPanels(array $panels) {
-    assert_instances_of($panels, 'PhabricatorDashboardPanel');
-    $this->panels = $panels;
-    return $this;
-  }
-
-  public function getPanels() {
-    return $this->assertAttached($this->panels);
+    return $this->setLayoutConfig($config);
   }
 
   public function isArchived() {
@@ -146,6 +112,24 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
 
   public function getObjectName() {
     return pht('Dashboard %d', $this->getID());
+  }
+
+  public function getPanelRefList() {
+    if (!$this->panelRefList) {
+      $this->panelRefList = $this->newPanelRefList();
+    }
+    return $this->panelRefList;
+  }
+
+  private function newPanelRefList() {
+    $raw_config = $this->getLayoutConfig();
+    return PhabricatorDashboardPanelRefList::newFromDictionary($raw_config);
+  }
+
+  public function getPanelPHIDs() {
+    $ref_list = $this->getPanelRefList();
+    $phids = mpull($ref_list->getPanelRefs(), 'getPanelPHID');
+    return array_unique($phids);
   }
 
 /* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
@@ -189,36 +173,25 @@ final class PhabricatorDashboard extends PhabricatorDashboardDAO
 
   public function destroyObjectPermanently(
     PhabricatorDestructionEngine $engine) {
-
-    $this->openTransaction();
-      $installs = id(new PhabricatorDashboardInstall())->loadAllWhere(
-        'dashboardPHID = %s',
-        $this->getPHID());
-      foreach ($installs as $install) {
-        $install->delete();
-      }
-
-      $this->delete();
-    $this->saveTransaction();
-  }
-
-
-/* -(  PhabricatorNgramInterface  )------------------------------------------ */
-
-
-  public function newNgrams() {
-    return array(
-      id(new PhabricatorDashboardNgrams())
-        ->setValue($this->getName()),
-    );
+    $this->delete();
   }
 
 /* -(  PhabricatorDashboardPanelContainerInterface  )------------------------ */
 
   public function getDashboardPanelContainerPanelPHIDs() {
-    return PhabricatorEdgeQuery::loadDestinationPHIDs(
-      $this->getPHID(),
-      PhabricatorDashboardDashboardHasPanelEdgeType::EDGECONST);
+    return $this->getPanelPHIDs();
+  }
+
+/* -(  PhabricatorFulltextInterface  )--------------------------------------- */
+
+  public function newFulltextEngine() {
+    return new PhabricatorDashboardFulltextEngine();
+  }
+
+/* -(  PhabricatorFerretInterface  )----------------------------------------- */
+
+  public function newFerretEngine() {
+    return new PhabricatorDashboardFerretEngine();
   }
 
 }

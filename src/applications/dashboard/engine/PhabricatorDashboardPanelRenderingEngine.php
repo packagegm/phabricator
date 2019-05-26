@@ -12,11 +12,11 @@ final class PhabricatorDashboardPanelRenderingEngine extends Phobject {
   private $enableAsyncRendering;
   private $parentPanelPHIDs;
   private $headerMode = self::HEADER_MODE_NORMAL;
-  private $dashboardID;
-  private $movable = true;
+  private $movable;
   private $panelHandle;
   private $editMode;
   private $contextObject;
+  private $panelKey;
 
   public function setContextObject($object) {
     $this->contextObject = $object;
@@ -27,13 +27,13 @@ final class PhabricatorDashboardPanelRenderingEngine extends Phobject {
     return $this->contextObject;
   }
 
-  public function setDashboardID($id) {
-    $this->dashboardID = $id;
+  public function setPanelKey($panel_key) {
+    $this->panelKey = $panel_key;
     return $this;
   }
 
-  public function getDashboardID() {
-    return $this->dashboardID;
+  public function getPanelKey() {
+    return $this->panelKey;
   }
 
   public function setHeaderMode($header_mode) {
@@ -182,10 +182,10 @@ final class PhabricatorDashboardPanelRenderingEngine extends Phobject {
 
 
   private function renderAsyncPanel() {
+    $context_phid = $this->getContextPHID();
     $panel = $this->getPanel();
 
     $panel_id = celerity_generate_unique_node_id();
-    $dashboard_id = $this->getDashboardID();
 
     Javelin::initBehavior(
       'dashboard-async-panel',
@@ -193,7 +193,9 @@ final class PhabricatorDashboardPanelRenderingEngine extends Phobject {
         'panelID' => $panel_id,
         'parentPanelPHIDs' => $this->getParentPanelPHIDs(),
         'headerMode' => $this->getHeaderMode(),
-        'dashboardID' => $dashboard_id,
+        'contextPHID' => $context_phid,
+        'panelKey' => $this->getPanelKey(),
+        'movable' => $this->getMovable(),
         'uri' => '/dashboard/panel/render/'.$panel->getID().'/',
       ));
 
@@ -279,11 +281,11 @@ final class PhabricatorDashboardPanelRenderingEngine extends Phobject {
     if ($panel) {
       $box->setMetadata(
         array(
-          'objectPHID' => $panel->getPHID(),
+          'panelKey' => $this->getPanelKey(),
         ));
     }
 
-    return phutil_tag_div('dashboard-pane', $box);
+    return $box;
   }
 
 
@@ -322,23 +324,35 @@ final class PhabricatorDashboardPanelRenderingEngine extends Phobject {
 
     $viewer = $this->getViewer();
     $panel = $this->getPanel();
-    $dashboard_id = $this->getDashboardID();
+    $context_phid = $this->getContextPHID();
 
     $actions = array();
 
     if ($panel) {
+      $panel_actions = $panel->newHeaderEditActions(
+        $viewer,
+        $context_phid);
+
+      if ($panel_actions) {
+        foreach ($panel_actions as $panel_action) {
+          $actions[] = $panel_action;
+        }
+        $actions[] = id(new PhabricatorActionView())
+          ->setType(PhabricatorActionView::TYPE_DIVIDER);
+      }
+
       $panel_id = $panel->getID();
 
       $edit_uri = "/dashboard/panel/edit/{$panel_id}/";
-      $edit_uri = new PhutilURI($edit_uri);
-      if ($dashboard_id) {
-        $edit_uri->replaceQueryParam('dashboardID', $dashboard_id);
-      }
+      $params = array(
+        'contextPHID' => $context_phid,
+      );
+      $edit_uri = new PhutilURI($edit_uri, $params);
 
       $actions[] = id(new PhabricatorActionView())
         ->setIcon('fa-pencil')
         ->setName(pht('Edit Panel'))
-        ->setHref((string)$edit_uri);
+        ->setHref($edit_uri);
 
       $actions[] = id(new PhabricatorActionView())
         ->setIcon('fa-window-maximize')
@@ -346,16 +360,19 @@ final class PhabricatorDashboardPanelRenderingEngine extends Phobject {
         ->setHref($panel->getURI());
     }
 
-    if ($dashboard_id) {
+    if ($context_phid) {
       $panel_phid = $this->getPanelPHID();
 
-      $remove_uri = "/dashboard/removepanel/{$dashboard_id}/";
-      $remove_uri = id(new PhutilURI($remove_uri))
-        ->replaceQueryParam('panelPHID', $panel_phid);
+      $remove_uri = urisprintf('/dashboard/adjust/remove/');
+      $params = array(
+        'contextPHID' => $context_phid,
+        'panelKey' => $this->getPanelKey(),
+      );
+      $remove_uri = new PhutilURI($remove_uri, $params);
 
       $actions[] = id(new PhabricatorActionView())
         ->setIcon('fa-times')
-        ->setHref((string)$remove_uri)
+        ->setHref($remove_uri)
         ->setName(pht('Remove Panel'))
         ->setWorkflow(true);
     }
@@ -415,5 +432,14 @@ final class PhabricatorDashboardPanelRenderingEngine extends Phobject {
     }
   }
 
+  private function getContextPHID() {
+    $context = $this->getContextObject();
+
+    if ($context) {
+      return $context->getPHID();
+    }
+
+    return null;
+  }
 
 }

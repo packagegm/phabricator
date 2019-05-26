@@ -10,7 +10,8 @@ final class PhabricatorDashboardPanel
     PhabricatorPolicyInterface,
     PhabricatorFlaggableInterface,
     PhabricatorDestructibleInterface,
-    PhabricatorNgramsInterface,
+    PhabricatorFulltextInterface,
+    PhabricatorFerretInterface,
     PhabricatorDashboardPanelContainerInterface {
 
   protected $name;
@@ -44,9 +45,8 @@ final class PhabricatorDashboardPanel
     ) + parent::getConfiguration();
   }
 
-  public function generatePHID() {
-    return PhabricatorPHID::generateNewPHID(
-      PhabricatorDashboardPanelPHIDType::TYPECONST);
+  public function getPHIDType() {
+    return PhabricatorDashboardPanelPHIDType::TYPECONST;
   }
 
   public function getProperty($key, $default = null) {
@@ -107,6 +107,15 @@ final class PhabricatorDashboardPanel
     return $this->requireImplementation()->getEditEngineFields($this);
   }
 
+  public function newHeaderEditActions(
+    PhabricatorUser $viewer,
+    $context_phid) {
+    return $this->requireImplementation()->newHeaderEditActions(
+      $this,
+      $viewer,
+      $context_phid);
+  }
+
 
 /* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
 
@@ -155,21 +164,22 @@ final class PhabricatorDashboardPanel
     $this->saveTransaction();
   }
 
-
-/* -(  PhabricatorNgramInterface  )------------------------------------------ */
-
-
-  public function newNgrams() {
-    return array(
-      id(new PhabricatorDashboardPanelNgrams())
-        ->setValue($this->getName()),
-    );
-  }
-
 /* -(  PhabricatorDashboardPanelContainerInterface  )------------------------ */
 
   public function getDashboardPanelContainerPanelPHIDs() {
     return $this->requireImplementation()->getSubpanelPHIDs($this);
+  }
+
+/* -(  PhabricatorFulltextInterface  )--------------------------------------- */
+
+  public function newFulltextEngine() {
+    return new PhabricatorDashboardPanelFulltextEngine();
+  }
+
+/* -(  PhabricatorFerretInterface  )----------------------------------------- */
+
+  public function newFerretEngine() {
+    return new PhabricatorDashboardPanelFerretEngine();
   }
 
 }
