@@ -132,18 +132,6 @@ final class ScoreCustomField extends PhabricatorStandardCustomField {
       $value = (int)$value;
       //默认颜色
       $color = '#1874CD'; 
-      /*if ($value == 10) {
-        $color = '#95098E';
-      }
-      else if ($value < 10 && $value > 7) {
-        $color = 'green';
-      }
-      else if ($value < 4 && $value > 0) {
-        $color = 'orange';
-      }
-      else if ($value == 0) {
-        $color = 'red';
-      }*/
       if ($value < 0) {
         $color = '#95098E';
       }
