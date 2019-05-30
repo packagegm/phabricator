@@ -147,7 +147,7 @@ final class ScoreCustomField extends PhabricatorStandardCustomField {
       if ($value < 0) {
         $color = '#95098E';
       }
-      else if ($value = 0) {
+      else if ($value == 0) {
         $color = 'green';
       }
       else if ($value > 0 && $value < 5) {
